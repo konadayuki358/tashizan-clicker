@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>足し算クリッカー</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app" id="app">
+    <div class="bg-orb orb-1"></div>
+    <div class="bg-orb orb-2"></div>
+
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-title">足し算クリッカー</div>
+        <div class="brand-subtitle">テンポよく四択で解いて、スコアをどんどん伸ばそう</div>
+      </div>
+      <div class="top-actions">
+        <button id="soundToggle" class="icon-button" type="button" aria-label="音声切り替え">🔇</button>
+        <button id="pauseButton" class="icon-button" type="button" aria-label="一時停止">⏸</button>
+      </div>
+    </header>
+
+    <main class="main-layout">
+      <section class="panel hud-panel">
+        <div class="score-card">
+          <div class="score-label">SCORE</div>
+          <div class="score-value" id="scoreValue">0</div>
+        </div>
+
+        <div class="status-grid">
+          <div class="mini-card">
+            <div class="mini-label">連続正解倍率</div>
+            <div class="mini-value" id="comboValue">×1.0</div>
+          </div>
+          <div class="mini-card">
+            <div class="mini-label">タイムボーナス</div>
+            <div class="mini-value" id="timeValue">×3</div>
+          </div>
+        </div>
+
+        <div class="unlock-card">
+          <div class="unlock-topline">
+            <span>次の解放まで</span>
+            <span id="unlockText">1〜10</span>
+          </div>
+          <div class="progress-bar">
+            <div class="progress-fill" id="unlockFill"></div>
+          </div>
+          <div class="unlock-bottomline" id="unlockDetail">0 / 150</div>
+        </div>
+
+        <div class="range-grid">
+          <div class="range-card">
+            <div class="range-header">左の数字</div>
+            <div class="range-control">
+              <button class="range-nav" type="button" data-range-side="left" data-range-dir="-1">◀</button>
+              <div class="range-center">
+                <div class="range-current" id="leftRangeCurrent">1〜6</div>
+                <div class="range-next" id="leftRangeNext"></div>
+              </div>
+              <button class="range-nav" type="button" data-range-side="left" data-range-dir="1">▶</button>
+            </div>
+          </div>
+
+          <div class="range-card">
+            <div class="range-header">右の数字</div>
+            <div class="range-control">
+              <button class="range-nav" type="button" data-range-side="right" data-range-dir="-1">◀</button>
+              <div class="range-center">
+                <div class="range-current" id="rightRangeCurrent">1〜6</div>
+                <div class="range-next" id="rightRangeNext"></div>
+              </div>
+              <button class="range-nav" type="button" data-range-side="right" data-range-dir="1">▶</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel play-panel">
+        <div class="question-stage" id="questionStage">
+          <div class="question-label">QUESTION</div>
+          <div class="question-text" id="questionText">1 + 1 = ?</div>
+          <div class="paused-mask" id="pausedMask">一時停止中</div>
+          <div class="feedback-layer" id="feedbackLayer"></div>
+        </div>
+
+        <div class="answers-grid" id="answersGrid"></div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal hidden" id="pauseModal" aria-hidden="true">
+    <div class="modal-backdrop" id="modalBackdrop"></div>
+    <div class="modal-panel">
+      <div class="modal-header">
+        <div>
+          <div class="modal-title">一時停止中</div>
+          <div class="modal-subtitle">設定変更や引き継ぎはここでできます</div>
+        </div>
+        <button id="resumeTopButton" class="icon-button small" type="button" aria-label="再開">▶</button>
+      </div>
+
+      <div class="modal-body">
+        <section class="modal-section compact">
+          <div class="section-title">設定</div>
+          <div class="modal-setting-row">
+            <span>音</span>
+            <button id="modalSoundToggle" class="small-action" type="button">OFF</button>
+          </div>
+          <div class="modal-range-grid">
+            <div class="range-card modal-range-card">
+              <div class="range-header">左の数字</div>
+              <div class="range-control">
+                <button class="range-nav" type="button" data-range-side="left" data-range-dir="-1">◀</button>
+                <div class="range-center">
+                  <div class="range-current" id="modalLeftRangeCurrent">1〜6</div>
+                  <div class="range-next" id="modalLeftRangeNext"></div>
+                </div>
+                <button class="range-nav" type="button" data-range-side="left" data-range-dir="1">▶</button>
+              </div>
+            </div>
+
+            <div class="range-card modal-range-card">
+              <div class="range-header">右の数字</div>
+              <div class="range-control">
+                <button class="range-nav" type="button" data-range-side="right" data-range-dir="-1">◀</button>
+                <div class="range-center">
+                  <div class="range-current" id="modalRightRangeCurrent">1〜6</div>
+                  <div class="range-next" id="modalRightRangeNext"></div>
+                </div>
+                <button class="range-nav" type="button" data-range-side="right" data-range-dir="1">▶</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="modal-section compact">
+          <div class="section-title">統計情報</div>
+          <div class="stats-list">
+            <div class="stat-row"><span>プレイ時間</span><strong id="statPlayTime">0:00</strong></div>
+            <div class="stat-row"><span>累計スコア</span><strong id="statTotalScore">0</strong></div>
+            <div class="stat-row"><span>計算した回数</span><strong id="statSolvedCount">0</strong></div>
+            <div class="stat-row"><span>最大連続正解数</span><strong id="statMaxCombo">0</strong></div>
+            <div class="stat-row"><span>1問の最高獲得スコア</span><strong id="statBestSingle">0</strong></div>
+          </div>
+        </section>
+
+        <section class="modal-section transfer-section">
+          <div class="section-title">引き継ぎコード</div>
+          <label class="textarea-label" for="exportCode">生成されたコード</label>
+          <textarea id="exportCode" class="transfer-box" readonly></textarea>
+          <div class="button-row two">
+            <button id="generateCodeButton" class="small-action" type="button">生成</button>
+            <button id="copyCodeButton" class="small-action" type="button">コピー</button>
+          </div>
+
+          <label class="textarea-label" for="importCode">入力して復元</label>
+          <textarea id="importCode" class="transfer-box" placeholder="ここに引き継ぎコードを貼り付けてください"></textarea>
+          <div class="button-row">
+            <button id="importCodeButton" class="primary-button" type="button">このコードで復元</button>
+          </div>
+          <div class="transfer-message" id="transferMessage"></div>
+        </section>
+      </div>
+
+      <div class="modal-footer">
+        <button id="resumeButton" class="primary-button large" type="button">ゲームに戻る</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
