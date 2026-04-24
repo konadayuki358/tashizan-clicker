@@ -25,7 +25,10 @@
     <main class="main-layout">
       <section class="panel hud-panel">
         <div class="score-card">
-          <div class="score-label">SCORE</div>
+          <div class="score-topline">
+            <div class="score-label" id="scoreLabel">足し算スコア</div>
+            <div class="mode-pill">モード：<span id="currentModeName">足し算</span></div>
+          </div>
           <div class="score-value" id="scoreValue">0</div>
         </div>
 
@@ -109,6 +112,25 @@
             <span>音</span>
             <button id="modalSoundToggle" class="small-action" type="button">OFF</button>
           </div>
+
+          <div class="mode-select-card">
+            <div class="mode-select-title">出題モード</div>
+            <div class="mode-button-grid">
+              <button class="mode-button selected" type="button" data-mode-select="addition">
+                <span class="mode-button-label">足し算モード</span>
+                <span class="mode-button-state">選択中</span>
+              </button>
+              <button class="mode-button" type="button" data-mode-select="reverse">
+                <span class="mode-button-label">逆算モード</span>
+                <span class="mode-button-state">未解放</span>
+              </button>
+              <button class="mode-button" type="button" data-mode-select="mixed">
+                <span class="mode-button-label">混合モード</span>
+                <span class="mode-button-state">未解放</span>
+              </button>
+            </div>
+          </div>
+
           <div class="modal-range-grid">
             <div class="range-card modal-range-card">
               <div class="range-header">左の数字</div>
@@ -141,6 +163,9 @@
           <div class="stats-list">
             <div class="stat-row"><span>プレイ時間</span><strong id="statPlayTime">0:00</strong></div>
             <div class="stat-row"><span>累計スコア</span><strong id="statTotalScore">0</strong></div>
+            <div class="stat-row"><span>足し算スコア</span><strong id="statAdditionScore">0</strong></div>
+            <div class="stat-row"><span>逆算スコア</span><strong id="statReverseScore">0</strong></div>
+            <div class="stat-row"><span>混合スコア</span><strong id="statMixedScore">0</strong></div>
             <div class="stat-row"><span>計算した回数</span><strong id="statSolvedCount">0</strong></div>
             <div class="stat-row"><span>最大連続正解数</span><strong id="statMaxCombo">0</strong></div>
             <div class="stat-row"><span>1問の最高獲得スコア</span><strong id="statBestSingle">0</strong></div>
