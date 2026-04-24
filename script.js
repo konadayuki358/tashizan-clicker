@@ -1,12 +1,13 @@
 const CONFIG = {
   storageKey: "addition-clicker-save-v1",
-  saveVersion: 1,
+  saveVersion: 2,
   ranges: [6, 10, 20, 30, 40, 50, 100, 200, 300, 400, 500, 1000],
   unlockScores: [0, 150, 450, 900, 1500, 2200, 3500, 5500, 8000, 11000, 15000, 22000],
   correctRevealMs: 300,
   wrongFlashMs: 220,
   tickMs: 100,
   autoSaveMs: 1000,
+  reverseMaxAnswer: 2000,
   timeBonus: {
     fastMs: 3000,
     middleMs: 5000,
@@ -25,6 +26,30 @@ const CONFIG = {
   },
 };
 
+const MODES = {
+  addition: {
+    key: "addition",
+    label: "足し算",
+    fullLabel: "足し算モード",
+    scoreLabel: "足し算スコア",
+  },
+  reverse: {
+    key: "reverse",
+    label: "逆算",
+    fullLabel: "逆算モード",
+    scoreLabel: "逆算スコア",
+  },
+  mixed: {
+    key: "mixed",
+    label: "混合",
+    fullLabel: "混合モード",
+    scoreLabel: "混合スコア",
+  },
+};
+
+const MODE_ORDER = ["addition", "reverse", "mixed"];
+const FINAL_RANGE_INDEX = CONFIG.ranges.length - 1;
+
 const ui = {};
 let state = createDefaultState();
 let audioContext = null;
@@ -36,11 +61,23 @@ let wrongTimer = null;
 function createDefaultState() {
   const firstRange = CONFIG.ranges[0];
   return {
-    totalScore: 0,
+    modeScores: {
+      addition: 0,
+      reverse: 0,
+      mixed: 0,
+    },
+    currentMode: "addition",
+    pendingMode: "addition",
     unlockedIndex: 0,
-    selectedRanges: {
-      left: firstRange,
-      right: firstRange,
+    reverseUnlockedIndex: 0,
+    unlockedModes: {
+      reverse: false,
+      mixed: false,
+    },
+    selectedRangesByMode: {
+      addition: { left: firstRange, right: firstRange },
+      reverse: { left: firstRange, right: firstRange },
+      mixed: { left: firstRange, right: firstRange },
     },
     soundEnabled: false,
     comboStreak: 0,
@@ -65,11 +102,24 @@ function createDefaultState() {
 function getPersistentState() {
   return {
     version: CONFIG.saveVersion,
-    totalScore: state.totalScore,
+    totalScore: getTotalScore(),
+    modeScores: {
+      addition: state.modeScores.addition,
+      reverse: state.modeScores.reverse,
+      mixed: state.modeScores.mixed,
+    },
+    currentMode: state.pendingMode || state.currentMode,
     unlockedIndex: state.unlockedIndex,
-    selectedRanges: {
-      left: state.selectedRanges.left,
-      right: state.selectedRanges.right,
+    reverseUnlockedIndex: state.reverseUnlockedIndex,
+    unlockedModes: {
+      reverse: state.unlockedModes.reverse,
+      mixed: state.unlockedModes.mixed,
+    },
+    selectedRanges: getSelectedRanges(state.currentMode),
+    selectedRangesByMode: {
+      addition: { ...state.selectedRangesByMode.addition },
+      reverse: { ...state.selectedRangesByMode.reverse },
+      mixed: { ...state.selectedRangesByMode.mixed },
     },
     soundEnabled: state.soundEnabled,
     stats: {
@@ -83,13 +133,64 @@ function getPersistentState() {
 
 function normalizeLoadedState(raw) {
   const fallback = createDefaultState();
-  const normalized = {
-    totalScore: Number.isFinite(raw?.totalScore) ? Math.max(0, Math.floor(raw.totalScore)) : 0,
-    unlockedIndex: Number.isFinite(raw?.unlockedIndex) ? Math.floor(raw.unlockedIndex) : 0,
-    selectedRanges: {
-      left: CONFIG.ranges[0],
-      right: CONFIG.ranges[0],
+  const oldTotalScore = Number.isFinite(raw?.totalScore) ? Math.max(0, Math.floor(raw.totalScore)) : 0;
+
+  const additionScore = Number.isFinite(raw?.modeScores?.addition)
+    ? Math.max(0, Math.floor(raw.modeScores.addition))
+    : oldTotalScore;
+  const reverseScore = Number.isFinite(raw?.modeScores?.reverse) ? Math.max(0, Math.floor(raw.modeScores.reverse)) : 0;
+  const mixedScore = Number.isFinite(raw?.modeScores?.mixed) ? Math.max(0, Math.floor(raw.modeScores.mixed)) : 0;
+
+  const additionUnlockedByScore = calculateUnlockedIndex(additionScore);
+  const rawAdditionUnlockedIndex = Number.isFinite(raw?.unlockedIndex) ? Math.floor(raw.unlockedIndex) : additionUnlockedByScore;
+  const additionUnlockedIndex = clamp(Math.min(rawAdditionUnlockedIndex, additionUnlockedByScore), 0, FINAL_RANGE_INDEX);
+
+  const reverseUnlockedByScore = calculateUnlockedIndex(reverseScore);
+  const rawReverseUnlockedIndex = Number.isFinite(raw?.reverseUnlockedIndex) ? Math.floor(raw.reverseUnlockedIndex) : reverseUnlockedByScore;
+  const reverseUnlockedIndex = clamp(Math.min(rawReverseUnlockedIndex, reverseUnlockedByScore), 0, FINAL_RANGE_INDEX);
+
+  const reverseUnlocked = Boolean(raw?.unlockedModes?.reverse || raw?.reverseUnlocked || additionUnlockedIndex >= FINAL_RANGE_INDEX);
+  const mixedUnlocked = Boolean(raw?.unlockedModes?.mixed || raw?.mixedUnlocked || reverseUnlockedIndex >= FINAL_RANGE_INDEX);
+
+  const oldSelectedRanges = raw?.selectedRanges || fallback.selectedRangesByMode.addition;
+  const rawSelectedRangesByMode = raw?.selectedRangesByMode || {};
+
+  const selectedRangesByMode = {
+    addition: normalizeSelectedRangesForMode(
+      rawSelectedRangesByMode.addition || oldSelectedRanges,
+      additionUnlockedIndex,
+    ),
+    reverse: normalizeSelectedRangesForMode(
+      rawSelectedRangesByMode.reverse || oldSelectedRanges,
+      reverseUnlocked ? reverseUnlockedIndex : 0,
+    ),
+    mixed: normalizeSelectedRangesForMode(
+      rawSelectedRangesByMode.mixed || oldSelectedRanges,
+      mixedUnlocked ? FINAL_RANGE_INDEX : 0,
+    ),
+  };
+
+  let currentMode = typeof raw?.currentMode === "string" ? raw.currentMode : "addition";
+  if (!isModeAvailable(currentMode, { reverse: reverseUnlocked, mixed: mixedUnlocked })) {
+    currentMode = "addition";
+  }
+
+  return {
+    ...fallback,
+    modeScores: {
+      addition: additionScore,
+      reverse: reverseScore,
+      mixed: mixedScore,
     },
+    currentMode,
+    pendingMode: currentMode,
+    unlockedIndex: additionUnlockedIndex,
+    reverseUnlockedIndex,
+    unlockedModes: {
+      reverse: reverseUnlocked,
+      mixed: mixedUnlocked,
+    },
+    selectedRangesByMode,
     soundEnabled: Boolean(raw?.soundEnabled),
     stats: {
       playTimeMs: Number.isFinite(raw?.stats?.playTimeMs) ? Math.max(0, Math.floor(raw.stats.playTimeMs)) : 0,
@@ -98,32 +199,15 @@ function normalizeLoadedState(raw) {
       bestSingleScore: Number.isFinite(raw?.stats?.bestSingleScore) ? Math.max(0, Math.floor(raw.stats.bestSingleScore)) : 0,
     },
   };
+}
 
-  normalized.unlockedIndex = clamp(normalized.unlockedIndex, 0, CONFIG.ranges.length - 1);
-
-  if (CONFIG.unlockScores[normalized.unlockedIndex] > normalized.totalScore) {
-    let recalculated = 0;
-    for (let i = 0; i < CONFIG.unlockScores.length; i += 1) {
-      if (normalized.totalScore >= CONFIG.unlockScores[i]) {
-        recalculated = i;
-      }
-    }
-    normalized.unlockedIndex = recalculated;
-  }
-
-  const maxUnlockedRange = CONFIG.ranges[normalized.unlockedIndex];
-  const rawLeft = Number(raw?.selectedRanges?.left);
-  const rawRight = Number(raw?.selectedRanges?.right);
-  normalized.selectedRanges.left = sanitizeSelectedRange(rawLeft, maxUnlockedRange);
-  normalized.selectedRanges.right = sanitizeSelectedRange(rawRight, maxUnlockedRange);
-
+function normalizeSelectedRangesForMode(rawRanges, unlockedIndex) {
+  const maxUnlockedRange = CONFIG.ranges[clamp(unlockedIndex, 0, FINAL_RANGE_INDEX)];
+  const rawLeft = Number(rawRanges?.left);
+  const rawRight = Number(rawRanges?.right);
   return {
-    ...fallback,
-    totalScore: normalized.totalScore,
-    unlockedIndex: normalized.unlockedIndex,
-    selectedRanges: normalized.selectedRanges,
-    soundEnabled: normalized.soundEnabled,
-    stats: normalized.stats,
+    left: sanitizeSelectedRange(rawLeft, maxUnlockedRange),
+    right: sanitizeSelectedRange(rawRight, maxUnlockedRange),
   };
 }
 
@@ -159,7 +243,9 @@ function cacheDom() {
   ui.body = document.body;
   ui.soundToggle = document.getElementById("soundToggle");
   ui.pauseButton = document.getElementById("pauseButton");
+  ui.scoreLabel = document.getElementById("scoreLabel");
   ui.scoreValue = document.getElementById("scoreValue");
+  ui.currentModeName = document.getElementById("currentModeName");
   ui.comboValue = document.getElementById("comboValue");
   ui.timeValue = document.getElementById("timeValue");
   ui.unlockText = document.getElementById("unlockText");
@@ -189,10 +275,14 @@ function cacheDom() {
   ui.transferMessage = document.getElementById("transferMessage");
   ui.statPlayTime = document.getElementById("statPlayTime");
   ui.statTotalScore = document.getElementById("statTotalScore");
+  ui.statAdditionScore = document.getElementById("statAdditionScore");
+  ui.statReverseScore = document.getElementById("statReverseScore");
+  ui.statMixedScore = document.getElementById("statMixedScore");
   ui.statSolvedCount = document.getElementById("statSolvedCount");
   ui.statMaxCombo = document.getElementById("statMaxCombo");
   ui.statBestSingle = document.getElementById("statBestSingle");
   ui.rangeButtons = Array.from(document.querySelectorAll("[data-range-side][data-range-dir]"));
+  ui.modeButtons = Array.from(document.querySelectorAll("[data-mode-select]"));
 }
 
 function bindEvents() {
@@ -222,7 +312,15 @@ function bindEvents() {
       }
       const side = button.dataset.rangeSide;
       const dir = Number(button.dataset.rangeDir);
-      cycleRange(side, dir);
+      const context = button.closest(".modal-panel") ? "modal" : "main";
+      cycleRange(side, dir, context);
+    });
+  });
+
+  ui.modeButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const mode = button.dataset.modeSelect;
+      selectPendingMode(mode);
     });
   });
 
@@ -275,21 +373,18 @@ function startTickLoop() {
 }
 
 function createQuestion() {
-  const leftMax = state.selectedRanges.left;
-  const rightMax = state.selectedRanges.right;
-  const a = randomInt(1, leftMax);
-  const b = randomInt(1, rightMax);
-  const sum = a + b;
+  state.currentMode = getAvailableMode(state.pendingMode);
+  state.pendingMode = state.currentMode;
+  clampSelectedRangesForMode(state.currentMode);
 
-  state.question = {
-    a,
-    b,
-    sum,
-    leftMax,
-    rightMax,
-    timeLost: false,
-    options: buildOptions(sum),
-  };
+  const selectedRanges = getSelectedRanges(state.currentMode);
+  const leftMax = selectedRanges.left;
+  const rightMax = selectedRanges.right;
+  const questionType = state.currentMode === "mixed" ? (Math.random() < 0.5 ? "addition" : "reverse") : state.currentMode;
+
+  state.question = questionType === "reverse"
+    ? createReverseQuestion(leftMax, rightMax, state.currentMode)
+    : createAdditionQuestion(leftMax, rightMax, state.currentMode);
 
   state.feedback = null;
   state.runtime.questionElapsedMs = 0;
@@ -298,7 +393,52 @@ function createQuestion() {
   renderAll();
 }
 
-function buildOptions(correctAnswer) {
+function createAdditionQuestion(leftMax, rightMax, scoreMode) {
+  const a = randomInt(1, leftMax);
+  const b = randomInt(1, rightMax);
+  const sum = a + b;
+
+  return {
+    type: "addition",
+    scoreMode,
+    a,
+    b,
+    sum,
+    baseScore: sum,
+    leftMax,
+    rightMax,
+    timeLost: false,
+    options: buildNumberOptions(sum),
+  };
+}
+
+function createReverseQuestion(leftMax, rightMax, scoreMode) {
+  const a = randomInt(1, leftMax);
+  const b = randomInt(1, rightMax);
+  const target = clamp(a + b, 2, CONFIG.reverseMaxAnswer);
+  const correctOption = {
+    label: `${formatNumber(a)} + ${formatNumber(b)}`,
+    isCorrect: true,
+    a,
+    b,
+    sum: target,
+  };
+
+  return {
+    type: "reverse",
+    scoreMode,
+    a,
+    b,
+    sum: target,
+    baseScore: target,
+    leftMax,
+    rightMax,
+    timeLost: false,
+    options: buildReverseOptions(target, leftMax, rightMax, correctOption),
+  };
+}
+
+function buildNumberOptions(correctAnswer) {
   const pool = new Set();
   const nearDiffs = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15];
 
@@ -325,40 +465,146 @@ function buildOptions(correctAnswer) {
   }
 
   pool.delete(correctAnswer);
-  const wrongChoices = shuffle(Array.from(pool)).slice(0, 3);
-  const result = shuffle([correctAnswer, ...wrongChoices]);
+  const wrongChoices = shuffle(Array.from(pool)).slice(0, 3).map((value) => ({
+    label: formatNumber(value),
+    value,
+    isCorrect: false,
+  }));
+
+  const result = shuffle([
+    { label: formatNumber(correctAnswer), value: correctAnswer, isCorrect: true },
+    ...wrongChoices,
+  ]);
 
   while (result.length < 4) {
     const extra = Math.max(1, correctAnswer + randomInt(-20, 20));
-    if (!result.includes(extra) && extra !== correctAnswer) {
-      result.push(extra);
+    if (!result.some((option) => option.value === extra) && extra !== correctAnswer) {
+      result.push({ label: formatNumber(extra), value: extra, isCorrect: false });
     }
   }
 
   return shuffle(result);
 }
 
+function buildReverseOptions(target, leftMax, rightMax, correctOption) {
+  const usedLabels = new Set([correctOption.label]);
+  const wrongOptions = [];
+  const nearbySums = shuffle([
+    target - 10,
+    target - 9,
+    target - 8,
+    target - 7,
+    target - 6,
+    target - 5,
+    target - 4,
+    target - 3,
+    target - 2,
+    target - 1,
+    target + 1,
+    target + 2,
+    target + 3,
+    target + 4,
+    target + 5,
+    target + 6,
+    target + 7,
+    target + 8,
+    target + 9,
+    target + 10,
+  ]);
+
+  nearbySums.forEach((sum) => {
+    if (wrongOptions.length >= 3) {
+      return;
+    }
+    const option = createExpressionOptionForSum(sum, leftMax, rightMax, target, usedLabels);
+    if (option) {
+      wrongOptions.push(option);
+      usedLabels.add(option.label);
+    }
+  });
+
+  let attempts = 0;
+  while (wrongOptions.length < 3 && attempts < 500) {
+    attempts += 1;
+    const a = randomInt(1, leftMax);
+    const b = randomInt(1, rightMax);
+    const sum = a + b;
+    const label = `${formatNumber(a)} + ${formatNumber(b)}`;
+
+    if (sum !== target && sum <= CONFIG.reverseMaxAnswer && !usedLabels.has(label)) {
+      const option = { label, isCorrect: false, a, b, sum };
+      wrongOptions.push(option);
+      usedLabels.add(label);
+    }
+  }
+
+  return shuffle([correctOption, ...wrongOptions]).slice(0, 4);
+}
+
+function createExpressionOptionForSum(sum, leftMax, rightMax, correctTarget, usedLabels) {
+  if (sum < 2 || sum > CONFIG.reverseMaxAnswer || sum === correctTarget) {
+    return null;
+  }
+
+  const minA = Math.max(1, sum - rightMax);
+  const maxA = Math.min(leftMax, sum - 1);
+  if (minA > maxA) {
+    return null;
+  }
+
+  const candidates = [];
+  for (let a = minA; a <= maxA; a += 1) {
+    const b = sum - a;
+    if (b >= 1 && b <= rightMax) {
+      const label = `${formatNumber(a)} + ${formatNumber(b)}`;
+      if (!usedLabels.has(label)) {
+        candidates.push({ label, isCorrect: false, a, b, sum });
+      }
+    }
+  }
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  return candidates[randomInt(0, candidates.length - 1)];
+}
+
+function rebuildOptionsForQuestion(question) {
+  if (question.type === "reverse") {
+    const correctOption = {
+      label: `${formatNumber(question.a)} + ${formatNumber(question.b)}`,
+      isCorrect: true,
+      a: question.a,
+      b: question.b,
+      sum: question.sum,
+    };
+    return buildReverseOptions(question.sum, question.leftMax, question.rightMax, correctOption);
+  }
+
+  return buildNumberOptions(question.sum);
+}
+
 function updateAnswerButtons() {
   ui.answersGrid.innerHTML = "";
 
-  state.question.options.forEach((value) => {
+  state.question.options.forEach((option) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "answer-button";
-    button.textContent = formatNumber(value);
-    button.dataset.value = String(value);
+    button.className = `answer-button${state.question.type === "reverse" ? " expression-answer" : ""}`;
+    button.textContent = option.label;
     button.disabled = state.runtime.isPaused || state.runtime.inputLocked;
-    button.addEventListener("click", () => handleAnswer(value, button));
+    button.addEventListener("click", () => handleAnswer(option, button));
     ui.answersGrid.appendChild(button);
   });
 }
 
-function handleAnswer(value, button) {
+function handleAnswer(option, button) {
   if (state.runtime.isPaused || state.runtime.inputLocked || !state.question) {
     return;
   }
 
-  if (value === state.question.sum) {
+  if (option.isCorrect) {
     handleCorrectAnswer(button);
   } else {
     handleWrongAnswer(button);
@@ -376,7 +622,7 @@ function handleWrongAnswer(button) {
 
   clearTimeout(wrongTimer);
   wrongTimer = setTimeout(() => {
-    state.question.options = buildOptions(state.question.sum);
+    state.question.options = rebuildOptionsForQuestion(state.question);
     state.runtime.inputLocked = false;
     updateAnswerButtons();
     renderAll();
@@ -388,9 +634,10 @@ function handleCorrectAnswer(button) {
 
   const timeMultiplier = getTimeMultiplier();
   const comboMultiplier = getComboMultiplier(state.comboStreak);
-  const gain = Math.ceil(state.question.sum * timeMultiplier * comboMultiplier);
+  const gain = Math.ceil(state.question.baseScore * timeMultiplier * comboMultiplier);
+  const scoreMode = state.question.scoreMode;
 
-  state.totalScore += gain;
+  state.modeScores[scoreMode] += gain;
   state.stats.solvedCount += 1;
   state.stats.bestSingleScore = Math.max(state.stats.bestSingleScore, gain);
 
@@ -398,7 +645,7 @@ function handleCorrectAnswer(button) {
   state.comboStreak = newCombo;
   state.stats.maxCombo = Math.max(state.stats.maxCombo, newCombo);
 
-  const unlockedRanges = unlockByScore();
+  const unlockedMessages = unlockByScore(scoreMode);
   const comboMilestone = newCombo > 0 && newCombo % CONFIG.combo.milestoneEvery === 0;
 
   button.classList.add("correct");
@@ -411,11 +658,11 @@ function handleCorrectAnswer(button) {
 
   state.feedback = {
     gain,
-    sum: state.question.sum,
+    baseScore: state.question.baseScore,
     timeMultiplier,
     comboMultiplier,
     comboMilestoneText: comboMilestone ? `${newCombo} COMBO!` : "",
-    unlockText: unlockedRanges.length > 0 ? `${unlockedRanges.join(" / ")} 解放!` : "",
+    unlockText: unlockedMessages.length > 0 ? `${unlockedMessages.join(" / ")}` : "",
   };
 
   renderAll();
@@ -429,28 +676,62 @@ function handleCorrectAnswer(button) {
   }, CONFIG.correctRevealMs);
 }
 
-function unlockByScore() {
-  const unlockedNames = [];
-  while (
-    state.unlockedIndex < CONFIG.ranges.length - 1 &&
-    state.totalScore >= CONFIG.unlockScores[state.unlockedIndex + 1]
-  ) {
-    state.unlockedIndex += 1;
-    unlockedNames.push(`1〜${CONFIG.ranges[state.unlockedIndex]}`);
+function unlockByScore(scoreMode) {
+  const messages = [];
+
+  if (scoreMode === "addition") {
+    while (
+      state.unlockedIndex < FINAL_RANGE_INDEX &&
+      state.modeScores.addition >= CONFIG.unlockScores[state.unlockedIndex + 1]
+    ) {
+      state.unlockedIndex += 1;
+      messages.push(`1〜${CONFIG.ranges[state.unlockedIndex]} 解放!`);
+    }
+
+    if (!state.unlockedModes.reverse && state.unlockedIndex >= FINAL_RANGE_INDEX) {
+      state.unlockedModes.reverse = true;
+      messages.push("逆算モード解放!");
+    }
   }
 
-  const maxAllowed = CONFIG.ranges[state.unlockedIndex];
-  state.selectedRanges.left = Math.min(state.selectedRanges.left, maxAllowed);
-  state.selectedRanges.right = Math.min(state.selectedRanges.right, maxAllowed);
+  if (scoreMode === "reverse") {
+    while (
+      state.reverseUnlockedIndex < FINAL_RANGE_INDEX &&
+      state.modeScores.reverse >= CONFIG.unlockScores[state.reverseUnlockedIndex + 1]
+    ) {
+      state.reverseUnlockedIndex += 1;
+      messages.push(`逆算 1〜${CONFIG.ranges[state.reverseUnlockedIndex]} 解放!`);
+    }
 
-  return unlockedNames;
+    if (!state.unlockedModes.mixed && state.reverseUnlockedIndex >= FINAL_RANGE_INDEX) {
+      state.unlockedModes.mixed = true;
+      messages.push("混合モード解放!");
+    }
+  }
+
+  clampAllSelectedRanges();
+  return messages;
 }
 
-function cycleRange(side, dir) {
-  const current = state.selectedRanges[side];
+function cycleRange(side, dir, context) {
+  const mode = context === "modal" ? state.pendingMode : state.currentMode;
+  const selectedRanges = getSelectedRanges(mode);
+  const current = selectedRanges[side];
   const currentIndex = CONFIG.ranges.indexOf(current);
-  const nextIndex = clamp(currentIndex + dir, 0, state.unlockedIndex);
-  state.selectedRanges[side] = CONFIG.ranges[nextIndex];
+  const maxIndex = getUnlockedIndexForMode(mode);
+  const nextIndex = clamp(currentIndex + dir, 0, maxIndex);
+  selectedRanges[side] = CONFIG.ranges[nextIndex];
+  renderAll();
+  saveState();
+}
+
+function selectPendingMode(mode) {
+  if (!MODE_ORDER.includes(mode) || !isModeAvailable(mode)) {
+    return;
+  }
+
+  state.pendingMode = mode;
+  clampSelectedRangesForMode(mode);
   renderAll();
   saveState();
 }
@@ -471,6 +752,7 @@ function pauseGame() {
   state.runtime.playStartedAt = 0;
   state.runtime.questionStartedAt = 0;
   state.runtime.isPaused = true;
+  state.pendingMode = getAvailableMode(state.pendingMode || state.currentMode);
   ui.body.classList.add("is-paused");
   ui.pauseModal.classList.remove("hidden");
   ui.pauseModal.setAttribute("aria-hidden", "false");
@@ -577,6 +859,7 @@ function renderAll() {
   renderQuestion();
   renderFeedback();
   renderButtonsState();
+  renderModeButtons();
   renderPauseModal();
 }
 
@@ -588,8 +871,14 @@ function renderLive() {
 }
 
 function renderScore() {
-  ui.scoreValue.textContent = formatNumber(state.totalScore);
-  ui.statTotalScore.textContent = formatNumber(state.totalScore);
+  const modeInfo = MODES[state.currentMode];
+  ui.scoreLabel.textContent = modeInfo.scoreLabel;
+  ui.currentModeName.textContent = modeInfo.label;
+  ui.scoreValue.textContent = formatNumber(state.modeScores[state.currentMode]);
+  ui.statTotalScore.textContent = formatNumber(getTotalScore());
+  ui.statAdditionScore.textContent = formatNumber(state.modeScores.addition);
+  ui.statReverseScore.textContent = formatNumber(state.modeScores.reverse);
+  ui.statMixedScore.textContent = formatNumber(state.modeScores.mixed);
 }
 
 function renderStatus() {
@@ -605,44 +894,56 @@ function renderStatus() {
 }
 
 function renderUnlockProgress() {
-  if (state.unlockedIndex >= CONFIG.ranges.length - 1) {
+  const mode = state.currentMode;
+
+  if (mode === "mixed") {
     ui.unlockText.textContent = "すべて解放済み";
     ui.unlockDetail.textContent = "MAX";
     ui.unlockFill.style.width = "100%";
     return;
   }
 
-  const currentFloor = CONFIG.unlockScores[state.unlockedIndex];
-  const nextTarget = CONFIG.unlockScores[state.unlockedIndex + 1];
-  const progress = clamp((state.totalScore - currentFloor) / (nextTarget - currentFloor), 0, 1);
+  const score = state.modeScores[mode];
+  const unlockedIndex = getUnlockedIndexForMode(mode);
 
-  ui.unlockText.textContent = `1〜${CONFIG.ranges[state.unlockedIndex + 1]}`;
-  ui.unlockDetail.textContent = `${formatNumber(state.totalScore)} / ${formatNumber(nextTarget)}`;
+  if (unlockedIndex >= FINAL_RANGE_INDEX) {
+    if (mode === "addition" && !state.unlockedModes.reverse) {
+      state.unlockedModes.reverse = true;
+    }
+    if (mode === "reverse" && !state.unlockedModes.mixed) {
+      state.unlockedModes.mixed = true;
+    }
+    ui.unlockText.textContent = mode === "addition" ? "逆算モード解放済み" : "混合モード解放済み";
+    ui.unlockDetail.textContent = "MAX";
+    ui.unlockFill.style.width = "100%";
+    return;
+  }
+
+  const currentFloor = CONFIG.unlockScores[unlockedIndex];
+  const nextTarget = CONFIG.unlockScores[unlockedIndex + 1];
+  const progress = clamp((score - currentFloor) / (nextTarget - currentFloor), 0, 1);
+
+  ui.unlockText.textContent = `1〜${CONFIG.ranges[unlockedIndex + 1]}`;
+  ui.unlockDetail.textContent = `${formatNumber(score)} / ${formatNumber(nextTarget)}`;
   ui.unlockFill.style.width = `${progress * 100}%`;
 }
 
 function renderRanges() {
-  renderRangeBlock("left", ui.leftRangeCurrent, ui.leftRangeNext, ui.modalLeftRangeCurrent, ui.modalLeftRangeNext);
-  renderRangeBlock("right", ui.rightRangeCurrent, ui.rightRangeNext, ui.modalRightRangeCurrent, ui.modalRightRangeNext);
-
-  ui.rangeButtons.forEach((button) => {
-    const side = button.dataset.rangeSide;
-    const dir = Number(button.dataset.rangeDir);
-    const currentIndex = CONFIG.ranges.indexOf(state.selectedRanges[side]);
-    const nextIndex = currentIndex + dir;
-    button.disabled = nextIndex < 0 || nextIndex > state.unlockedIndex;
-  });
+  renderRangeBlock("left", ui.leftRangeCurrent, ui.leftRangeNext, state.currentMode, true);
+  renderRangeBlock("right", ui.rightRangeCurrent, ui.rightRangeNext, state.currentMode, true);
+  renderRangeBlock("left", ui.modalLeftRangeCurrent, ui.modalLeftRangeNext, state.pendingMode, false);
+  renderRangeBlock("right", ui.modalRightRangeCurrent, ui.modalRightRangeNext, state.pendingMode, false);
 }
 
-function renderRangeBlock(side, currentEl, nextEl, modalCurrentEl, modalNextEl) {
-  const activeRange = state.question ? state.question[side === "left" ? "leftMax" : "rightMax"] : state.selectedRanges[side];
-  const selectedRange = state.selectedRanges[side];
+function renderRangeBlock(side, currentEl, nextEl, mode, useActiveQuestionRange) {
+  const selectedRange = getSelectedRanges(mode)[side];
+  const activeRange = useActiveQuestionRange && state.question
+    ? state.question[side === "left" ? "leftMax" : "rightMax"]
+    : selectedRange;
   const nextText = activeRange === selectedRange ? "" : `次から 1〜${selectedRange}`;
 
   currentEl.textContent = `1〜${activeRange}`;
   nextEl.textContent = nextText;
-  modalCurrentEl.textContent = `1〜${activeRange}`;
-  modalNextEl.textContent = nextText;
 }
 
 function renderQuestion() {
@@ -650,7 +951,13 @@ function renderQuestion() {
     ui.questionText.textContent = "";
     return;
   }
-  ui.questionText.textContent = `${state.question.a} + ${state.question.b} = ?`;
+
+  if (state.question.type === "reverse") {
+    ui.questionText.textContent = formatNumber(state.question.sum);
+    return;
+  }
+
+  ui.questionText.textContent = `${formatNumber(state.question.a)} + ${formatNumber(state.question.b)} = ?`;
 }
 
 function renderFeedback() {
@@ -673,7 +980,7 @@ function renderFeedback() {
   ui.feedbackLayer.innerHTML = `
     <div class="feedback-box">
       <div class="feedback-main">+${formatNumber(state.feedback.gain)}!</div>
-      <div class="feedback-sub">+${formatNumber(state.feedback.sum)}!</div>
+      <div class="feedback-sub">+${formatNumber(state.feedback.baseScore)}!</div>
       <div class="feedback-lines">${parts.join("")}</div>
     </div>
   `;
@@ -688,6 +995,37 @@ function renderButtonsState() {
   ui.soundToggle.textContent = state.soundEnabled ? "🔊" : "🔇";
   ui.modalSoundToggle.textContent = state.soundEnabled ? "ON" : "OFF";
   ui.pauseButton.disabled = state.runtime.inputLocked;
+
+  ui.rangeButtons.forEach((button) => {
+    const side = button.dataset.rangeSide;
+    const dir = Number(button.dataset.rangeDir);
+    const context = button.closest(".modal-panel") ? "modal" : "main";
+    const mode = context === "modal" ? state.pendingMode : state.currentMode;
+    const currentIndex = CONFIG.ranges.indexOf(getSelectedRanges(mode)[side]);
+    const nextIndex = currentIndex + dir;
+    const maxIndex = getUnlockedIndexForMode(mode);
+    button.disabled = nextIndex < 0 || nextIndex > maxIndex;
+  });
+}
+
+function renderModeButtons() {
+  ui.modeButtons.forEach((button) => {
+    const mode = button.dataset.modeSelect;
+    const available = isModeAvailable(mode);
+    const isSelected = state.pendingMode === mode;
+    const labelEl = button.querySelector(".mode-button-label");
+    const stateEl = button.querySelector(".mode-button-state");
+
+    button.disabled = !available;
+    button.classList.toggle("selected", isSelected);
+
+    if (labelEl) {
+      labelEl.textContent = MODES[mode].fullLabel;
+    }
+    if (stateEl) {
+      stateEl.textContent = available ? (isSelected ? "選択中" : "選択可") : "未解放";
+    }
+  });
 }
 
 function renderPauseModal() {
@@ -743,14 +1081,8 @@ function importFromCode(code) {
     clearTimeout(feedbackTimer);
     clearTimeout(wrongTimer);
 
-    const fresh = createDefaultState();
     state = {
-      ...fresh,
-      totalScore: loaded.totalScore,
-      unlockedIndex: loaded.unlockedIndex,
-      selectedRanges: loaded.selectedRanges,
-      soundEnabled: loaded.soundEnabled,
-      stats: loaded.stats,
+      ...loaded,
       runtime: {
         isPaused: true,
         inputLocked: false,
@@ -794,6 +1126,65 @@ function decodeSaveData(code) {
     return `%${char.charCodeAt(0).toString(16).padStart(2, "0")}`;
   }).join("");
   return JSON.parse(decodeURIComponent(percentEncoded));
+}
+
+function getTotalScore() {
+  return state.modeScores.addition + state.modeScores.reverse + state.modeScores.mixed;
+}
+
+function calculateUnlockedIndex(score) {
+  let unlockedIndex = 0;
+  for (let i = 0; i < CONFIG.unlockScores.length; i += 1) {
+    if (score >= CONFIG.unlockScores[i]) {
+      unlockedIndex = i;
+    }
+  }
+  return clamp(unlockedIndex, 0, FINAL_RANGE_INDEX);
+}
+
+function getUnlockedIndexForMode(mode) {
+  if (mode === "reverse") {
+    return state.unlockedModes.reverse ? state.reverseUnlockedIndex : 0;
+  }
+  if (mode === "mixed") {
+    return state.unlockedModes.mixed ? FINAL_RANGE_INDEX : 0;
+  }
+  return state.unlockedIndex;
+}
+
+function getSelectedRanges(mode) {
+  if (!state.selectedRangesByMode[mode]) {
+    state.selectedRangesByMode[mode] = { left: CONFIG.ranges[0], right: CONFIG.ranges[0] };
+  }
+  return state.selectedRangesByMode[mode];
+}
+
+function clampSelectedRangesForMode(mode) {
+  const selectedRanges = getSelectedRanges(mode);
+  const maxAllowed = CONFIG.ranges[getUnlockedIndexForMode(mode)];
+  selectedRanges.left = sanitizeSelectedRange(selectedRanges.left, maxAllowed);
+  selectedRanges.right = sanitizeSelectedRange(selectedRanges.right, maxAllowed);
+}
+
+function clampAllSelectedRanges() {
+  MODE_ORDER.forEach((mode) => clampSelectedRangesForMode(mode));
+}
+
+function isModeAvailable(mode, unlockedModes = state.unlockedModes) {
+  if (mode === "addition") {
+    return true;
+  }
+  if (mode === "reverse") {
+    return Boolean(unlockedModes.reverse);
+  }
+  if (mode === "mixed") {
+    return Boolean(unlockedModes.mixed);
+  }
+  return false;
+}
+
+function getAvailableMode(mode) {
+  return isModeAvailable(mode) ? mode : "addition";
 }
 
 function formatPlayTime(ms) {
